@@ -1,3 +1,6 @@
 [submodule "abb_packages/ABBDriver"]
 	path = abb_packages/ABBDriver
 	url = https://github.com/Collaborative-Robotic-Arms/ABBDriver.git
+[submodule "detection_grasping"]
+	path = detection_grasping
+	url = https://github.com/Collaborative-Robotic-Arms/detection_grasping.git
