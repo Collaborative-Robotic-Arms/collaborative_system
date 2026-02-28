@@ -16,3 +16,18 @@
 [submodule "abb_packages/ros2_RobotSimulation"]
 	path = abb_packages/ros2_RobotSimulation
 	url = https://github.com/Collaborative-Robotic-Arms/ros2_RobotSimulation.git
+[submodule "Ar4_driver"]
+	path = Ar4_driver
+	url = https://github.com/Collaborative-Robotic-Arms/Ar4_driver.git
+[submodule "dual_arms_packages/assembly_environment"]
+	path = dual_arms_packages/assembly_environment
+	url = https://github.com/Collaborative-Robotic-Arms/assembly_environment.git
+[submodule "dual_arms_packages/solvers_dual_arms"]
+	path = dual_arms_packages/solvers_dual_arms
+	url = https://github.com/Collaborative-Robotic-Arms/solvers_dual_arms.git
+[submodule "dual_arms_packages/dual_arms"]
+	path = dual_arms_packages/dual_arms
+	url = https://github.com/Collaborative-Robotic-Arms/dual_arms.git
+[submodule "dual_arms_packages/dual_arms_msgs"]
+	path = dual_arms_packages/dual_arms_msgs
+	url = https://github.com/Collaborative-Robotic-Arms/dual_arms_msgs.git
