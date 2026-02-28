@@ -10,3 +10,9 @@
 [submodule "ros2_gui_bridge"]
 	path = ros2_gui_bridge
 	url = https://github.com/Collaborative-Robotic-Arms/ros2_gui_bridge.git
+[submodule "abb_packages/ros2_SimRealRobotControl"]
+	path = abb_packages/ros2_SimRealRobotControl
+	url = https://github.com/Collaborative-Robotic-Arms/ros2_SimRealRobotControl.git
+[submodule "abb_packages/ros2_RobotSimulation"]
+	path = abb_packages/ros2_RobotSimulation
+	url = https://github.com/Collaborative-Robotic-Arms/ros2_RobotSimulation.git
