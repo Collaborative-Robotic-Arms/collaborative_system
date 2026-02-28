@@ -1,0 +1,15 @@
+[submodule "supervisor_package"]
+	path = supervisor_package
+	url = https://github.com/Collaborative-Robotic-Arms/supervisor_package.git
+[submodule "ros2_gui_bridge"]
+	path = ros2_gui_bridge
+	url = https://github.com/Collaborative-Robotic-Arms/ros2_gui_bridge.git
+[submodule "detection_grasping"]
+	path = detection_grasping
+	url = https://github.com/Collaborative-Robotic-Arms/detection_grasping.git
+[submodule "abb_packages/ABBDriver"]
+	path = abb_packages/ABBDriver
+	url = https://github.com/Collaborative-Robotic-Arms/ABBDriver.git
+[submodule "abb_packages/ros2_SimRealRobotControl"]
+	path = abb_packages/ros2_SimRealRobotControl
+	url = https://github.com/Collaborative-Robotic-Arms/ros2_SimRealRobotControl.git
