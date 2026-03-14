@@ -1,0 +1,8 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: dual_arms_teach_panel/TeachPanel
+    Name: Teach & Record
+    # Panel persists robot selection and program name across sessions
+    ActiveRobot: abb_irb120
+    ProgramName: program_001

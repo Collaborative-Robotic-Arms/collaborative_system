@@ -1,0 +1,11 @@
+<!-- Registers the panel with RViz plugin system -->
+<library path="dual_arms_teach_panel">
+  <class name="dual_arms_teach_panel/TeachPanel"
+         type="dual_arms_teach_panel::TeachPanel"
+         base_class_type="rviz_common::Panel">
+    <description>
+      Teach and record waypoints for dual-arm assembly programs.
+      Supports marker drag, servo jog, and manual XYZ input.
+    </description>
+  </class>
+</library>
