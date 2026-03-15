@@ -34,3 +34,7 @@
 [submodule "dual_robot_teach_replay"]
 	path = dual_robot_teach_replay
 	url = https://github.com/Collaborative-Robotic-Arms/dual_robot_teach_replay.git
+[submodule "abb_packages/abb_gripper_urdf"]
+	path = abb_packages/abb_gripper_urdf
+	url = https://github.com/Collaborative-Robotic-Arms/abb_gripper_urdf.git
+	branch = main
