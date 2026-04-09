@@ -36,6 +36,9 @@ public:
 signals:
   // Emitted when Space bar is pressed — TeachPanel records the waypoint
   void recordRequested();
+  // Emitted on every key press/release with the current jog twist.
+  // TeachPanel uses this to move the interactive marker (not the real robot).
+  void jogTwist(const geometry_msgs::msg::Twist& twist);
 
 protected:
   void keyPressEvent(QKeyEvent* event) override;
@@ -45,9 +48,8 @@ private:
   void buildUI();
   void publishJogCommand();
 
-  // ROS2
+  // ROS2 node kept for future use (e.g. parameter reads)
   rclcpp::Node::SharedPtr node_;
-  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr twist_pub_;
 
   // Current jog command (zeroed on key release)
   geometry_msgs::msg::Twist jog_cmd_;
