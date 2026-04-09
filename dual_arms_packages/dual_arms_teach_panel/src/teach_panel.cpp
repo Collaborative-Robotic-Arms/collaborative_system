@@ -14,6 +14,7 @@
 #include <ctime>
 #include <algorithm>
 #include <thread>
+#include <cmath>
 
 namespace dual_arms_teach_panel {
 
@@ -37,43 +38,79 @@ void TeachPanel::onInitialize()
 {
   node_ = getDisplayContext()->getRosNodeAbstraction().lock()->get_raw_node();
 
-  // ── Inherit sim time from RViz parent node ──────────────────
-  // getRosNodeAbstraction() returns a sub-node that does NOT
-  // automatically inherit use_sim_time from the RViz node in Jazzy
   if (!node_->has_parameter("use_sim_time")) {
     node_->declare_parameter("use_sim_time", true);
   } else {
     node_->set_parameter(rclcpp::Parameter("use_sim_time", true));
   }
 
-  // Subscribe to joint states
+  // ── Joint states ─────────────────────────────────────────────
   joint_state_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
-  "/joint_states", 10,
-  [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
-    current_joint_states_ = msg;
+    "/joint_states", 10,
+    [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
+      current_joint_states_ = msg;
 
-    // ── Throttle UI updates to 10Hz max ──────────────────────
-    auto now = std::chrono::steady_clock::now();
-    auto dt  = std::chrono::duration_cast<std::chrono::milliseconds>(
-                 now - last_display_update_).count();
-    if (dt < 100) return;  // skip if less than 100ms since last update
-    last_display_update_ = now;
+      auto now = std::chrono::steady_clock::now();
+      auto dt  = std::chrono::duration_cast<std::chrono::milliseconds>(
+                   now - last_display_update_).count();
+      if (dt < 100) return;
+      last_display_update_ = now;
 
-    if (!moveit_initialized_) {
-      initializeMoveIt();
-      return;
-    }
-    QMetaObject::invokeMethod(
-      this, &TeachPanel::updateCurrentPoseDisplay, Qt::QueuedConnection);
-  });
+      if (!moveit_initialized_) {
+        initializeMoveIt();
+        return;
+      }
+      QMetaObject::invokeMethod(
+        this, &TeachPanel::updateCurrentPoseDisplay, Qt::QueuedConnection);
+    });
 
   program_exec_pub_ = node_->create_publisher<std_msgs::msg::String>(
     "/dt/program_execute", 1);
   estop_pub_ = node_->create_publisher<std_msgs::msg::String>(
     "/dt/estop", 1);
 
-  // ── MoveIt2 is NOT initialized here anymore ──
-  // It will be initialized lazily when first /joint_states arrives
+  // Inside TeachPanel::onInitialize()
+  move_marker_pub_ = node_->create_publisher<geometry_msgs::msg::PoseStamped>(
+  "/rviz/moveit/move_marker/goal", 10);
+
+  // ── Interactive marker feedback subscriber ────────────────────
+  // The MotionPlanning display publishes here whenever the user drags
+  // the 3D marker. We store the EE pose so Record can use it without
+  // any blocking MoveIt2 call.
+  marker_feedback_sub_ =
+    node_->create_subscription<visualization_msgs::msg::InteractiveMarkerFeedback>(
+      "/rviz_moveit_motion_planning_display"
+      "/robot_interaction_interactive_marker_topic/feedback",
+      10,
+      [this](const visualization_msgs::msg::InteractiveMarkerFeedback::SharedPtr msg) {
+        if (msg->event_type !=
+            visualization_msgs::msg::InteractiveMarkerFeedback::POSE_UPDATE) return;
+        latest_marker_pose_  = msg->pose;
+        marker_pose_received_ = true;
+        // Keep servo_target_pose_ in sync with the real marker position.
+        // This way, when the user switches to Servo Jog, jogging starts
+        // from wherever the marker currently is — not from a stale position.
+        if (!servo_initialized_) {
+          servo_target_pose_ = msg->pose;
+        }
+      });
+
+  // ── ServoJogWidget ────────────────────────────────────────────
+  // Instantiated here (not in buildUI) because it needs node_.
+  if (servo_tab_widget_) {
+    servo_jog_widget_ = new ServoJogWidget(node_, servo_tab_widget_);
+    auto* tab_layout = qobject_cast<QVBoxLayout*>(servo_tab_widget_->layout());
+    if (tab_layout) {
+      QLayoutItem* item = tab_layout->takeAt(0);   // remove placeholder label
+      if (item) { delete item->widget(); delete item; }
+      tab_layout->insertWidget(0, servo_jog_widget_);
+    }
+    connect(servo_jog_widget_, &ServoJogWidget::recordRequested,
+            this, &TeachPanel::onRecordWaypoint);
+    connect(servo_jog_widget_, &ServoJogWidget::jogTwist,
+            this, &TeachPanel::onServoJogTwist);
+  }
+
   status_label_->setText("Waiting for joint states...");
 }
 
@@ -167,6 +204,7 @@ void TeachPanel::buildUI()
   teach_tabs_->addTab(marker_tab, "Marker Drag");
   teach_tabs_->addTab(servo_tab,  "Servo Jog");
   teach_tabs_->addTab(manual_tab, "Manual XYZ");
+  servo_tab_widget_ = servo_tab;  // saved so onInitialize() can inject ServoJogWidget
   connect(teach_tabs_, &QTabWidget::currentChanged,
           this, &TeachPanel::onTeachModeChanged);
   root_layout->addWidget(teach_tabs_);
@@ -292,79 +330,297 @@ void TeachPanel::onRobotChanged(int index)
 {
   active_robot_ = robot_selector_->itemText(index).toStdString();
   status_label_->setText(QString("Active robot: %1").arg(active_robot_.c_str()));
+  // Reset stored marker pose — new robot, new marker
+  marker_pose_received_ = false;
+  servo_target_pose_ = geometry_msgs::msg::Pose();
+  servo_target_pose_.orientation.w = 1.0;
 }
 
 void TeachPanel::onTeachModeChanged(int index)
 {
   jog_mode_ = index;
   if (jog_mode_ == 1) {
+    // Entering Servo Jog tab — reset so servo_target_pose_ re-seeds
+    // from the current marker position (picked up via feedback subscriber).
+    servo_initialized_ = false;
     jog_timer_->start();
   } else {
     jog_timer_->stop();
-    jog_cmd_ = geometry_msgs::msg::Twist();  // zero velocities
+    jog_cmd_ = geometry_msgs::msg::Twist();
   }
 }
 
 void TeachPanel::onJogTick()
 {
   // Called at 50 Hz while servo jog tab is active.
-  // The actual publishing is done by ServoJogWidget via keyPress/keyRelease.
-  // This tick is reserved for future gamepad polling.
+  // Actual publishing is done by ServoJogWidget via keyPress/keyRelease.
+}
+
+// ─────────────────────────────────────────────────────────────
+// onServoJogTwist — move the interactive marker by the twist delta
+//
+// Called by ServoJogWidget::jogTwist signal on every key press/release.
+// Instead of executing on the robot, we offset the current marker pose
+// and republish it to /rviz/moveit/move_marker/goal_<group>.
+// The MotionPlanning display picks that up and moves the marker,
+// which then fires a POSE_UPDATE feedback → latest_marker_pose_ updated.
+// ─────────────────────────────────────────────────────────────
+void TeachPanel::onServoJogTwist(const geometry_msgs::msg::Twist& twist)
+{
+  // Initialise servo_target_pose_ from the current marker position
+  // the first time a key is pressed (or after a robot switch).
+  if (!servo_initialized_) {
+    if (marker_pose_received_) {
+      servo_target_pose_ = latest_marker_pose_;
+    } else if (current_joint_states_) {
+      // Fallback: use actual robot position as starting point
+      servo_target_pose_ = geometry_msgs::msg::Pose();
+      servo_target_pose_.position.x    = 0.3;
+      servo_target_pose_.position.z    = 0.3;
+      servo_target_pose_.orientation.w = 1.0;
+    } else {
+      return;  // nothing to start from
+    }
+    servo_initialized_ = true;
+  }
+
+  const double dt = 0.02;  // 50 Hz step size
+
+  // ── Linear delta ───────────────────────────────────────────
+  servo_target_pose_.position.x += twist.linear.x * dt;
+  servo_target_pose_.position.y += twist.linear.y * dt;
+  servo_target_pose_.position.z += twist.linear.z * dt;
+
+  // ── Rotational delta (yaw = angular.z, roll = angular.x) ──
+  // Compose quaternion with small rotation increments.
+  // q_new = q_delta * q_old
+  auto compose_yaw = [](geometry_msgs::msg::Pose& pose, double dAngle) {
+    double c = std::cos(dAngle * 0.5), s = std::sin(dAngle * 0.5);
+    double w = pose.orientation.w, z = pose.orientation.z;
+    double x = pose.orientation.x, y = pose.orientation.y;
+    // Rotate by dAngle around world Z
+    pose.orientation.w = c * w - s * z;
+    pose.orientation.x = c * x - s * y;
+    pose.orientation.y = c * y + s * x;
+    pose.orientation.z = c * z + s * w;
+    // Re-normalize
+    double n = std::sqrt(pose.orientation.w * pose.orientation.w +
+                         pose.orientation.x * pose.orientation.x +
+                         pose.orientation.y * pose.orientation.y +
+                         pose.orientation.z * pose.orientation.z);
+    if (n > 1e-6) {
+      pose.orientation.w /= n; pose.orientation.x /= n;
+      pose.orientation.y /= n; pose.orientation.z /= n;
+    }
+  };
+
+  auto compose_roll = [](geometry_msgs::msg::Pose& pose, double dAngle) {
+    double c = std::cos(dAngle * 0.5), s = std::sin(dAngle * 0.5);
+    double w = pose.orientation.w, x = pose.orientation.x;
+    double y = pose.orientation.y, z = pose.orientation.z;
+    pose.orientation.w = c * w - s * x;
+    pose.orientation.x = c * x + s * w;
+    pose.orientation.y = c * y + s * z;
+    pose.orientation.z = c * z - s * y;
+    double n = std::sqrt(pose.orientation.w * pose.orientation.w +
+                         pose.orientation.x * pose.orientation.x +
+                         pose.orientation.y * pose.orientation.y +
+                         pose.orientation.z * pose.orientation.z);
+    if (n > 1e-6) {
+      pose.orientation.w /= n; pose.orientation.x /= n;
+      pose.orientation.y /= n; pose.orientation.z /= n;
+    }
+  };
+
+  if (std::abs(twist.angular.z) > 1e-6)
+    compose_yaw(servo_target_pose_, twist.angular.z * dt);
+  if (std::abs(twist.angular.x) > 1e-6)
+    compose_roll(servo_target_pose_, twist.angular.x * dt);
+
+  // ── Move the RViz interactive marker to the new pose ─────────
+  // Publishing to this topic makes the MotionPlanning display update
+  // the 3D marker position so the user gets visual feedback while jogging.
+  if (move_marker_pub_ && node_) {
+    geometry_msgs::msg::PoseStamped ps;
+    ps.header.stamp    = node_->now();
+    ps.header.frame_id = (active_robot_ == "abb_irb120") ? "base_link" : "ar4_base_link";
+    ps.pose            = servo_target_pose_;
+    move_marker_pub_->publish(ps);
+  }
+
+  // Update status bar for continuous visual feedback while jogging
+  status_label_->setText(
+    QString("Jog: X=%1 Y=%2 Z=%3")
+      .arg(servo_target_pose_.position.x, 0, 'f', 3)
+      .arg(servo_target_pose_.position.y, 0, 'f', 3)
+      .arg(servo_target_pose_.position.z, 0, 'f', 3));
+}
+
+void TeachPanel::onSetFromXYZ()
+{
+  if (!node_) {
+    status_label_->setText("⚠ Not initialized yet.");
+    return;
+  }
+
+  // Build target pose from spinboxes
+  manual_target_pose_.position.x = x_spin_->value();
+  manual_target_pose_.position.y = y_spin_->value();
+  manual_target_pose_.position.z = z_spin_->value();
+
+  double rx = rx_spin_->value() * M_PI / 180.0;
+  double ry = ry_spin_->value() * M_PI / 180.0;
+  double rz = rz_spin_->value() * M_PI / 180.0;
+
+  double cy = std::cos(rz * 0.5), sy = std::sin(rz * 0.5);
+  double cp = std::cos(ry * 0.5), sp = std::sin(ry * 0.5);
+  double cr = std::cos(rx * 0.5), sr = std::sin(rx * 0.5);
+
+  manual_target_pose_.orientation.w = cr * cp * cy + sr * sp * sy;
+  manual_target_pose_.orientation.x = sr * cp * cy - cr * sp * sy;
+  manual_target_pose_.orientation.y = cr * sp * cy + sr * cp * sy;
+  manual_target_pose_.orientation.z = cr * cp * sy - sr * sp * cy;
+
+  // Publish to move the RViz interactive marker visually
+  if (move_marker_pub_) {
+    geometry_msgs::msg::PoseStamped ps;
+    ps.header.stamp    = node_->now();
+    ps.header.frame_id = (active_robot_ == "abb_irb120") ? "base_link" : "ar4_base_link";
+    ps.pose            = manual_target_pose_;
+    move_marker_pub_->publish(ps);
+  }
+
+  status_label_->setText(
+    QString("📍 Target: X=%1 Y=%2 Z=%3 — press RECORD to save.")
+      .arg(manual_target_pose_.position.x, 0, 'f', 3)
+      .arg(manual_target_pose_.position.y, 0, 'f', 3)
+      .arg(manual_target_pose_.position.z, 0, 'f', 3));
 }
 
 void TeachPanel::onRecordWaypoint()
 {
-  if (!abb_mg_ || !ar4_mg_) {
-  status_label_->setText("⚠ MoveIt2 not ready yet — wait for 'Ready' status.");
-  return;
-  }
-
-  if (!current_joint_states_) {
-    status_label_->setText("⚠ No joint states received yet.");
+  // ── Guard: MoveIt2 must be fully initialized ─────────────────
+  if (!moveit_initialized_ || !abb_mg_ || !ar4_mg_) {
+    status_label_->setText("⚠ MoveIt2 not ready yet — wait for 'Ready' status.");
     return;
   }
 
-  Waypoint wp;
-  wp.name      = waypoint_name_edit_->text().toStdString();
-  wp.robot     = active_robot_;
-  wp.timestamp = getCurrentTimestamp();
-  wp.validated = false;
+  // ── Determine pose source based on teach mode ─────────────────
+  //
+  //  Mode 0 (Marker Drag): use latest_marker_pose_ from feedback subscriber.
+  //    The user dragged the RViz interactive marker. Record the EE goal pose.
+  //
+  //  Mode 1 (Servo Jog): use servo_target_pose_ accumulated by onServoJogTwist.
+  //    The user jogged the EE incrementally. Record that accumulated pose.
+  //
+  //  Mode 2 (Manual XYZ): use manual_target_pose_ set by onSetFromXYZ.
+  //    The user typed in XYZ/RPY values. Record that pose.
+  //
+  // In all cases: pose → IK → joint vector. No state monitor, no planning.
 
-  auto& mg = (active_robot_ == "abb_irb120") ? abb_mg_ : ar4_mg_;
-  wp.joints  = mg->getCurrentJointValues();
-  wp.ee_pose = mg->getCurrentPose().pose;
+  geometry_msgs::msg::Pose target_pose;
+  bool have_pose = false;
 
-  if (wp.name.empty()) {
-    wp.name = active_robot_.substr(0, 3) + "_wp_" + std::to_string(waypoints_.size() + 1);
-    waypoint_name_edit_->setText(QString::fromStdString(wp.name));
+  if (jog_mode_ == 0) {
+    if (!marker_pose_received_) {
+      status_label_->setText(
+        "⚠ Drag the interactive marker first, then press Record.");
+      return;
+    }
+    target_pose = latest_marker_pose_;
+    have_pose   = true;
+  } else if (jog_mode_ == 1) {
+    target_pose = servo_target_pose_;
+    have_pose   = true;
+  } else if (jog_mode_ == 2) {
+    target_pose = manual_target_pose_;
+    have_pose   = true;
   }
 
-  waypoints_.push_back(wp);
-  updateWaypointList();
+  if (!have_pose) {
+    status_label_->setText("⚠ No target pose set.");
+    return;
+  }
 
-  status_label_->setText(
-    QString("✅ Recorded: %1  [%2 total]")
-      .arg(wp.name.c_str()).arg(waypoints_.size()));
+  // Snapshot waypoint fields now (on Qt thread, safe)
+  std::string wp_name   = waypoint_name_edit_->text().toStdString();
+  std::string wp_robot  = active_robot_;
+  std::string wp_ts     = getCurrentTimestamp();
+  int         wp_idx    = static_cast<int>(waypoints_.size()) + 1;
 
-  waypoint_name_edit_->clear();
+  status_label_->setText("⏳ Solving IK...");
+
+  // ── Run IK on a background thread ────────────────────────────
+  // setApproximateJointValueTarget internally calls IK. We must NOT
+  // call it on the Qt main thread — it can block and cause the segfault.
+  std::thread([this, target_pose, wp_name, wp_robot, wp_ts, wp_idx]() {
+    auto& mg = (wp_robot == "abb_irb120") ? abb_mg_ : ar4_mg_;
+
+    // setApproximateJointValueTarget runs the IK solver and stores
+    // the result as the goal joint state inside the MoveGroupInterface.
+    mg->setApproximateJointValueTarget(target_pose, mg->getEndEffectorLink());
+
+    // Read back the IK result — this is just a vector copy, no ROS call
+    std::vector<double> joints;
+    mg->getJointValueTarget(joints);
+
+    // Marshal back to Qt thread to update UI and waypoints_
+    QMetaObject::invokeMethod(this, [this, joints, target_pose,
+                                     wp_name, wp_robot, wp_ts, wp_idx]() {
+      if (joints.empty()) {
+        status_label_->setText(
+          "❌ IK failed for this pose — try a different position.");
+        return;
+      }
+
+      Waypoint wp;
+      wp.joints    = joints;
+      wp.ee_pose   = target_pose;
+      wp.robot     = wp_robot;
+      wp.timestamp = wp_ts;
+      wp.validated = false;
+      wp.name      = wp_name.empty()
+        ? wp_robot.substr(0, 3) + "_wp_" + std::to_string(wp_idx)
+        : wp_name;
+
+      waypoint_name_edit_->setText(QString::fromStdString(wp.name));
+      waypoints_.push_back(wp);
+      updateWaypointList();
+
+      status_label_->setText(
+        QString("✅ Recorded: %1  [%2 joints, %3 total]")
+          .arg(wp.name.c_str())
+          .arg(wp.joints.size())
+          .arg(waypoints_.size()));
+
+      waypoint_name_edit_->clear();
+    }, Qt::QueuedConnection);
+  }).detach();
 }
 
 void TeachPanel::onGoToWaypoint()
 {
   if (!abb_mg_ || !ar4_mg_) {
-  status_label_->setText("⚠ MoveIt2 not ready yet — wait for 'Ready' status.");
-  return;
+    status_label_->setText("⚠ MoveIt2 not ready yet.");
+    return;
   }
 
   int row = waypoint_list_->currentRow();
   if (row < 0 || row >= static_cast<int>(waypoints_.size())) return;
 
   const Waypoint& wp = waypoints_[row];
-  auto& mg = (wp.robot == "abb_irb120") ? abb_mg_ : ar4_mg_;
 
+  if (wp.joints.empty()) {
+    status_label_->setText("⚠ Waypoint has no joint data — re-record it.");
+    return;
+  }
+
+  auto& mg = (wp.robot == "abb_irb120") ? abb_mg_ : ar4_mg_;
   status_label_->setText(QString("Planning to %1...").arg(wp.name.c_str()));
 
+  mg->setStartStateToCurrentState();
   mg->setJointValueTarget(wp.joints);
+
   moveit::planning_interface::MoveGroupInterface::Plan plan;
   auto result = mg->plan(plan);
 
@@ -390,41 +646,6 @@ void TeachPanel::onWaypointSelected(int row)
   (void)row;  // reserved for future preview functionality
 }
 
-void TeachPanel::onSetFromXYZ()
-{
-  // Build a target pose from the spinbox values and send to MoveIt2
-  geometry_msgs::msg::Pose target;
-  target.position.x = x_spin_->value();
-  target.position.y = y_spin_->value();
-  target.position.z = z_spin_->value();
-
-  // Convert RPY (degrees) to quaternion
-  double rx = rx_spin_->value() * M_PI / 180.0;
-  double ry = ry_spin_->value() * M_PI / 180.0;
-  double rz = rz_spin_->value() * M_PI / 180.0;
-
-  double cy = cos(rz * 0.5), sy = sin(rz * 0.5);
-  double cp = cos(ry * 0.5), sp = sin(ry * 0.5);
-  double cr = cos(rx * 0.5), sr = sin(rx * 0.5);
-
-  target.orientation.w = cr * cp * cy + sr * sp * sy;
-  target.orientation.x = sr * cp * cy - cr * sp * sy;
-  target.orientation.y = cr * sp * cy + sr * cp * sy;
-  target.orientation.z = cr * cp * sy - sr * sp * cy;
-
-  auto& mg = (active_robot_ == "abb_irb120") ? abb_mg_ : ar4_mg_;
-  mg->setPoseTarget(target);
-
-  moveit::planning_interface::MoveGroupInterface::Plan plan;
-  auto result = mg->plan(plan);
-
-  if (result == moveit::core::MoveItErrorCode::SUCCESS) {
-    status_label_->setText("✅ XYZ pose reachable — press Record to save.");
-    mg->execute(plan);
-  } else {
-    status_label_->setText("❌ XYZ pose not reachable. Adjust values.");
-  }
-}
 
 void TeachPanel::onSaveProgram()
 {
@@ -456,10 +677,9 @@ void TeachPanel::onLoadProgram()
 void TeachPanel::onValidateInSim()
 {
   if (!abb_mg_ || !ar4_mg_) {
-  status_label_->setText("⚠ MoveIt2 not ready yet — wait for 'Ready' status.");
-  return;
+    status_label_->setText("⚠ MoveIt2 not ready yet.");
+    return;
   }
-
   if (waypoints_.empty()) {
     status_label_->setText("⚠ No waypoints to validate.");
     return;
@@ -472,10 +692,22 @@ void TeachPanel::onValidateInSim()
     auto& wp = waypoints_[i];
     auto& mg = (wp.robot == "abb_irb120") ? abb_mg_ : ar4_mg_;
 
+    if (wp.joints.empty()) {
+      wp.validated = false;
+      status_label_->setText(
+        QString("❌ Waypoint #%1 '%2' has no joint data — re-record it.")
+          .arg(i + 1).arg(wp.name.c_str()));
+      all_ok = false;
+      break;
+    }
+
+    // Use planning scene state instead of hardware state monitor
+    // This avoids the sim clock timeout in getCurrentRobotState()
+    mg->setStartStateToCurrentState();
     mg->setJointValueTarget(wp.joints);
+
     moveit::planning_interface::MoveGroupInterface::Plan plan;
     auto result = mg->plan(plan);
-
     wp.validated = (result == moveit::core::MoveItErrorCode::SUCCESS);
 
     if (!wp.validated) {

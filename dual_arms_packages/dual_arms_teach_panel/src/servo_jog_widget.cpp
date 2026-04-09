@@ -9,13 +9,7 @@ namespace dual_arms_teach_panel {
 ServoJogWidget::ServoJogWidget(rclcpp::Node::SharedPtr node, QWidget* parent)
   : QWidget(parent), node_(node)
 {
-  // Publish to moveit_servo's twist command topic
-  twist_pub_ = node_->create_publisher<geometry_msgs::msg::Twist>(
-    "/servo_node/delta_twist_cmds", 10);
-
   buildUI();
-
-  // Required so keyPressEvent is delivered to this widget
   setFocusPolicy(Qt::StrongFocus);
 }
 
@@ -89,7 +83,9 @@ void ServoJogWidget::keyReleaseEvent(QKeyEvent* event)
 
 void ServoJogWidget::publishJogCommand()
 {
-  twist_pub_->publish(jog_cmd_);
+  // Emit signal — TeachPanel decides what to do with the twist
+  // (move the interactive marker in Marker Drag / Servo Jog modes)
+  emit jogTwist(jog_cmd_);
 }
 
 }  // namespace dual_arms_teach_panel
