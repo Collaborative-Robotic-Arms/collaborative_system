@@ -1,0 +1,7 @@
+<library path="abb_gripper_controller">
+  <class name="abb_gripper_driver/ABBGripperHWInterface" 
+         type="abb_gripper_driver::ABBGripperHWInterface" 
+         base_class_type="hardware_interface::SystemInterface">
+    <description>ABB Gripper Hardware Interface</description>
+  </class>
+</library>
