@@ -11,6 +11,7 @@
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <visualization_msgs/msg/interactive_marker_feedback.hpp>
 
 // ── MoveIt2 ───────────────────────────────────────────────────
 // NOTE: .hpp not .h  — .h is obsolete in ROS2 Jazzy and causes
@@ -85,6 +86,8 @@ private slots:
 
   // Servo jog (called by jog_timer_ at 50 Hz)
   void onJogTick();
+  // Called by ServoJogWidget::jogTwist — moves the interactive marker
+  void onServoJogTwist(const geometry_msgs::msg::Twist& twist);
 
   // Joint state callback (marshalled to Qt thread)
   void onJointStatesReceived(const sensor_msgs::msg::JointState::SharedPtr msg);
@@ -110,6 +113,27 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr program_exec_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr estop_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr move_marker_pub_;
+
+  // Subscribes to the MotionPlanning display's interactive marker feedback.
+  // Gives us the current marker EE pose goal without touching the state monitor.
+  rclcpp::Subscription<
+    visualization_msgs::msg::InteractiveMarkerFeedback>::SharedPtr marker_feedback_sub_;
+
+  // Latest EE pose received from interactive marker drag.
+  geometry_msgs::msg::Pose latest_marker_pose_;
+  bool marker_pose_received_ = false;
+
+  // Accumulated EE pose for servo jog (updated incrementally by onServoJogTwist).
+  geometry_msgs::msg::Pose servo_target_pose_;
+  bool servo_initialized_ = false;
+
+  // EE pose set by Manual XYZ spinboxes (onSetFromXYZ).
+  geometry_msgs::msg::Pose manual_target_pose_;
+
+  // Servo jog widget (created in onInitialize after node_ is ready)
+  class ServoJogWidget* servo_jog_widget_ = nullptr;
+  QWidget*              servo_tab_widget_ = nullptr;
 
   // ── MoveIt2 ──────────────────────────────────────────────────
   std::shared_ptr<moveit::planning_interface::MoveGroupInterface> abb_mg_;
