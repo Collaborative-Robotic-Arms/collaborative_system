@@ -35,3 +35,6 @@
 	path = abb_packages/abb_gripper_urdf
 	url = https://github.com/Collaborative-Robotic-Arms/abb_gripper_urdf.git
 	branch = main
+[submodule "dual_arms_packages/iot_handler_station"]
+	path = dual_arms_packages/iot_handler_station
+	url = https://github.com/Collaborative-Robotic-Arms/iot_handler_station.git
